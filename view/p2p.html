@@ -1,0 +1,318 @@
+<style>
+  * {
+    padding: 0;
+    margin: 0;
+  }
+
+  #user-list {
+    padding: 24px;
+    box-shadow: 5px 3px 12px rgb(111, 149, 255);
+    border: 1px solid rgb(158, 193, 241);
+    border-radius: 6px;
+    margin: 24px;
+  }
+
+  #user-list h1 {
+    font-size: 32px;
+    font-weight: bold;
+    color: #333;
+    position: relative;
+    margin-bottom: 12px;
+  }
+
+  #user-list h1::before {
+    content: '';
+    position: absolute;
+    width: 60px;
+    height: 6px;
+    background-color: rgb(33, 117, 235);
+    left: 4px;
+    bottom: -4px;
+  }
+
+  .user-item {
+    border-bottom: 1px solid #f4f5f6;
+    padding: 12px 6px;
+    font-size: 24px;
+    font-weight: bold;
+    color: #333;
+    display: flex;
+    align-items: center;
+  }
+
+  .user-item:last-child {
+    border-bottom: none;
+  }
+
+
+  .user-item button {
+    background-color: rgb(64, 139, 243);
+    color: #fff;
+    box-shadow: 5px 3px 12px rgb(111, 149, 255);
+    border: none;
+    outline: none;
+    padding: 8px 26px;
+    font-size: 16px;
+    border-radius: 4px;
+    margin-left: 24px;
+    cursor: pointer;
+    transition: all .2s;
+  }
+
+  .user-item button:hover {
+    box-shadow: 5px 3px 20px rgb(111, 149, 255);
+  }
+
+  .user-item button:active {
+    background-color: rgb(20, 112, 241);
+  }
+
+  li {
+    list-style: none;
+  }
+
+  #video-list {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .video {
+    width: 430px;
+    max-height: 600px;
+    margin-bottom: 24px;
+    border-radius: 8px;
+    overflow: hidden;
+    display: none;
+  }
+</style>
+<div id="app">
+  <div id="user-list">
+    <h1>用户列表<span id="current-user"></span></h1>
+    <ul>
+    </ul>
+  </div>
+
+  <div id="video-list">
+    <video class="video" id="video-local" autoplay></video>
+    <video class="video" id="video-remote" autoplay></video>
+  </div>
+
+</div>
+<script src="https://cdn.bootcdn.net/ajax/libs/socket.io/4.0.0/socket.io.min.js"></script>
+<script>
+  //封装一部分函数
+  function getUserMedia(constrains) {
+    let promise = null;
+    if (navigator.mediaDevices.getUserMedia) {
+      //最新标准API
+      promise = navigator.mediaDevices.getUserMedia(constrains)
+    } else if (navigator.webkitGetUserMedia) {
+      //webkit内核浏览器
+      promise = navigator.webkitGetUserMedia(constrains)
+    } else if (navigator.mozGetUserMedia) {
+      //Firefox浏览器
+      promise = navagator.mozGetUserMedia(constrains)
+    } else if (navigator.getUserMedia) {
+      //旧版API
+      promise = navigator.getUserMedia(constrains);
+    }
+    return promise;
+  }
+
+  function initDisplayMedia(deviceId) {
+    return navigator.mediaDevices.getDisplayMedia({
+      video: {
+        //修改视频宽高
+        width: 1680,
+        height: 1050,
+
+        //设置帧率
+        frameRate: 30,
+        facingMode: 'enviroment',
+        deviceId: deviceId ? { exact: deviceId } : undefined
+      },
+      audio: false
+    })
+  }
+
+  function InitCamera(option = {}) {
+    return new Promise((resolve, rerject) => {
+
+      const streamPrimise = getUserMedia({
+        video: typeof option.video === 'undefined' ? true : option.video,
+        audio: typeof option.audio === 'undefined' ? true : option.audio,
+      });
+      if (streamPrimise) {
+        streamPrimise.then(resolve, rerject);
+      } else {
+        rerject(new Error('您的浏览器不兼容'));
+      }
+    });
+  }
+
+  function createPeerConnection() {
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        {
+          urls: ["stun:stun.counterpath.net:3478"]
+        }
+      ]
+    });
+    return pc;
+  }
+
+  const socket = io('/p2p');
+
+  let localStream = null;
+  let pc = createPeerConnection();
+  let videoLocalEl = document.querySelector("#video-local");
+  let videoRemoteEl = document.querySelector('#video-remote');
+  const userListEl = document.querySelector('#user-list ul');
+  const currentUserEL = document.querySelector('#current-user');
+
+  socket.on('connect', () => {
+    currentUserEL.textContent = socket.id;
+  });
+
+  userListEl.addEventListener('click', onClickCallButton, true);
+
+  function joinUser(user) {
+
+    if (socket.id === user) return;
+
+    const liEl = document.createElement('li');
+    const spanEl = document.createElement('span');
+    const buttonEl = document.createElement('button');
+    buttonEl.value = "通话";
+    buttonEl.textContent = "通话";
+    buttonEl.dataset.user = user;
+
+    liEl.dataset.user = user;
+    spanEl.textContent = user;
+
+    liEl.className = "user-item";
+
+    liEl.appendChild(spanEl);
+    liEl.appendChild(buttonEl);
+
+    userListEl.appendChild(liEl);
+  }
+
+  function leaveUser(user) {
+    const itemEl = userListEl.querySelector(`[data-user=${user}]`);
+    if (itemEl) {
+      itemEl.remove();
+    }
+  }
+
+  function StartCall(toUser, createOffer) {
+    pc.ontrack = (ev) => {
+      let str = ev.streams[0];
+      videoRemoteEl.srcObject = str;
+      videoRemoteEl.style.display = 'block';
+    };
+
+    pc.onicecandidate = (ev) => {
+      socket.emit('ice-candidate', {
+        to: toUser,
+        from: socket.id,
+        value: ev.candidate,
+      });
+    };
+    pc.onnegotiationneeded = (ev) => {
+      if (createOffer) {
+        pc
+          .createOffer()
+          .then((offer) => {
+            return pc.setLocalDescription(offer);
+          })
+          .then(() => {
+            socket.emit('sdp', {
+              to: toUser,
+              from: socket.id,
+              type: 'video-offer',
+              value: pc.localDescription
+            });
+          });
+      }
+    };
+    return InitCamera({
+      audio: false
+    })
+      .then(stream => {
+        videoLocalEl.style.display = 'block';
+        localStream = stream;
+        videoLocalEl.srcObject = stream;
+        return stream;
+      })
+      .then(stream => {
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+        return stream;
+      });
+  }
+
+  function onClickCallButton(event) {
+    const user = event.target.dataset.user;
+    console.log('call user', user);
+    StartCall(user, true);
+  }
+
+  // 用户相关
+  socket.on('users', (data) => {
+    userListEl.innerHTML = '';
+    // socketId
+    data.users.map(joinUser)
+  });
+
+  socket.on('join', (data) => {
+    // socketId
+    joinUser(data.user);
+  });
+
+  socket.on('leave', (data) => {
+    // socketId
+    leaveUser(data.user);
+  });
+
+  // 监听相关
+  socket.on('sdp', (data) => {
+    const session = new RTCSessionDescription(data.value);
+
+    if (data.value.type === 'offer') {
+      StartCall(data.from, false)
+        .then(() => {
+          return pc.setRemoteDescription(session)
+        }).then(() => {
+          return pc.createAnswer()
+            .then((answer) => {
+              return pc.setLocalDescription(answer);
+            })
+            .then(() => {
+              socket.emit('sdp', {
+                type: 'video-answer',
+                value: pc.localDescription,
+                to: data.from,
+                from: socket.id
+              });
+            })
+        });
+    } else {
+      pc.setRemoteDescription(session);
+    }
+  });
+
+  socket.on('ice-candidate', (data) => {
+    if (!data.value) {
+      return;
+    }
+
+    const candidate = new RTCIceCandidate(data.value);
+    pc.addIceCandidate(candidate)
+      .catch((e) => {
+        console.log(e);
+      });
+  });
+
+
+</script>
